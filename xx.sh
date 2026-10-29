@@ -169,32 +169,56 @@ get_config_all() {
     echo ""
     echo "SNI: $COMMON_SNI"
     echo ""
-    info "配置 VLESS + WebSocket (无 TLS)"
-    read -p "$(echo -e "${CYAN}域名:${NC} ")" WS_DOMAIN
-    [[ -z $WS_DOMAIN ]] && error "域名不能为空"
-    echo "域名: $WS_DOMAIN"
-    read -p "$(echo -e "${CYAN}端口 (回车随机 10000-50000):${NC} ")" WS_PORT
-    [[ -z $WS_PORT ]] && WS_PORT=$((RANDOM % 40001 + 10000))
-    echo "端口: $WS_PORT"
 
-    echo ""
-    info "配置 Hysteria2"
-    read -p "$(echo -e "${CYAN}端口 (回车随机 10000-50000):${NC} ")" HY2_PORT
-    [[ -z $HY2_PORT ]] && HY2_PORT=$((RANDOM % 40001 + 10000))
-    echo "端口: $HY2_PORT"
-    read -p "$(echo -e "${CYAN}端口跳跃范围 (起始-结束，默认 10000-50000):${NC} ")" HY2_PORTS
-    [[ -z $HY2_PORTS ]] && HY2_PORTS="10000-50000"
-    if [[ ! "$HY2_PORTS" =~ ^[0-9]+-[0-9]+$ ]]; then
-        warn "端口范围格式错误，使用默认 10000-50000"
-        HY2_PORTS="10000-50000"
+    ENABLE_WS=0; ENABLE_HY2=0; ENABLE_ANYTLS=0
+
+    echo "请选择要安装的协议（可多选，用空格或逗号分隔，例如: 1 3 或 2）:"
+    echo "  1) VLESS + WebSocket (无 TLS)"
+    echo "  2) Hysteria2"
+    echo "  3) AnyTLS"
+    read -p "$(echo -e "${CYAN}请输入选项:${NC} ")" PROTO_CHOICE
+    for n in ${PROTO_CHOICE//,/ }; do
+        case "$n" in
+            1) ENABLE_WS=1 ;;
+            2) ENABLE_HY2=1 ;;
+            3) ENABLE_ANYTLS=1 ;;
+        esac
+    done
+    if [[ $ENABLE_WS -eq 0 && $ENABLE_HY2 -eq 0 && $ENABLE_ANYTLS -eq 0 ]]; then
+        error "至少需要选择一个协议"
     fi
-    echo "端口跳跃: $HY2_PORTS"
+    echo "已选择: $([ $ENABLE_WS -eq 1 ] && printf 'WS ') $([ $ENABLE_HY2 -eq 1 ] && printf 'HY2 ') $([ $ENABLE_ANYTLS -eq 1 ] && printf 'AnyTLS ')"
 
-    echo ""
-    info "配置 AnyTLS"
-    read -p "$(echo -e "${CYAN}端口 (回车随机 10000-50000):${NC} ")" ANYTLS_PORT
-    [[ -z $ANYTLS_PORT ]] && ANYTLS_PORT=$((RANDOM % 40001 + 10000))
-    echo "端口: $ANYTLS_PORT"
+    if [[ $ENABLE_WS -eq 1 ]]; then
+        echo ""; info "配置 VLESS + WebSocket (无 TLS)"
+        read -p "$(echo -e "${CYAN}域名:${NC} ")" WS_DOMAIN
+        [[ -z $WS_DOMAIN ]] && error "域名不能为空"
+        echo "域名: $WS_DOMAIN"
+        read -p "$(echo -e "${CYAN}端口 (回车随机 10000-50000):${NC} ")" WS_PORT
+        [[ -z $WS_PORT ]] && WS_PORT=$((RANDOM % 40001 + 10000))
+        echo "端口: $WS_PORT"
+    fi
+
+    if [[ $ENABLE_HY2 -eq 1 ]]; then
+        echo ""; info "配置 Hysteria2"
+        read -p "$(echo -e "${CYAN}端口 (回车随机 10000-50000):${NC} ")" HY2_PORT
+        [[ -z $HY2_PORT ]] && HY2_PORT=$((RANDOM % 40001 + 10000))
+        echo "端口: $HY2_PORT"
+        read -p "$(echo -e "${CYAN}端口跳跃范围 (起始-结束，默认 10000-50000):${NC} ")" HY2_PORTS
+        [[ -z $HY2_PORTS ]] && HY2_PORTS="10000-50000"
+        if [[ ! "$HY2_PORTS" =~ ^[0-9]+-[0-9]+$ ]]; then
+            warn "端口范围格式错误，使用默认 50000-50009"
+            HY2_PORTS="50000-50009"
+        fi
+        echo "端口跳跃: $HY2_PORTS"
+    fi
+
+    if [[ $ENABLE_ANYTLS -eq 1 ]]; then
+        echo ""; info "配置 AnyTLS"
+        read -p "$(echo -e "${CYAN}端口 (回车随机 10000-50000):${NC} ")" ANYTLS_PORT
+        [[ -z $ANYTLS_PORT ]] && ANYTLS_PORT=$((RANDOM % 40001 + 10000))
+        echo "端口: $ANYTLS_PORT"
+    fi
     echo ""
 }
 
@@ -206,7 +230,6 @@ write_config() {
         \"key_path\": \"$KEY_FILE\",
         \"server_name\": \"$COMMON_SNI\"
     }"
-
         local anytls_tls="{
         \"enabled\": true,
         \"certificate_path\": \"$CERT_FILE\",
@@ -214,58 +237,105 @@ write_config() {
         \"server_name\": \"$COMMON_SNI\"
     }"
 
+        local inbounds=()
+        if [[ $ENABLE_WS -eq 1 ]]; then
+            inbounds+=("    {
+      \"type\": \"vless\",
+      \"tag\": \"VLESS-WS-in\",
+      \"listen\": \"::\",
+      \"listen_port\": $WS_PORT,
+      \"users\": [
+        { \"uuid\": \"$UUID\", \"flow\": \"\" }
+      ],
+      \"transport\": {
+        \"type\": \"ws\",
+        \"path\": \"/\",
+        \"headers\": { \"Host\": \"$WS_DOMAIN\" }
+      }
+    }")
+        fi
+        if [[ $ENABLE_HY2 -eq 1 ]]; then
+            inbounds+=("    {
+      \"type\": \"hysteria2\",
+      \"tag\": \"HY2-in\",
+      \"listen\": \"::\",
+      \"listen_port\": $HY2_PORT,
+      \"users\": [ { \"password\": \"$UUID\" } ],
+      \"tls\": $hy2_tls
+    }")
+        fi
+        if [[ $ENABLE_ANYTLS -eq 1 ]]; then
+            inbounds+=("    {
+      \"type\": \"anytls\",
+      \"tag\": \"AnyTLS-in\",
+      \"listen\": \"::\",
+      \"listen_port\": $ANYTLS_PORT,
+      \"users\": [ { \"password\": \"$UUID\" } ],
+      \"tls\": $anytls_tls
+    }")
+        fi
+
+        local inbounds_json="" first=1
+        for ib in "${inbounds[@]}"; do
+            if [[ $first -eq 1 ]]; then inbounds_json="$ib"; first=0
+            else inbounds_json="$inbounds_json,
+$ib"; fi
+        done
+
         cat > "$CONFIG_JSON" <<EOF
 {
-  "log": {
-    "level": "error",
-    "output": "/dev/null",
-    "timestamp": false
-  },
+  "log": { "level": "error", "output": "/dev/null", "timestamp": false },
   "inbounds": [
-    {
-      "type": "vless",
-      "tag": "VLESS-WS-in",
-      "listen": "::",
-      "listen_port": $WS_PORT,
-      "users": [
-        { "uuid": "$UUID", "flow": "" }
-      ],
-      "transport": {
-        "type": "ws",
-        "path": "/",
-        "headers": {
-          "Host": "$WS_DOMAIN"
-        }
-      }
-    },
-    {
-      "type": "hysteria2",
-      "tag": "HY2-in",
-      "listen": "::",
-      "listen_port": $HY2_PORT,
-      "users": [
-        { "password": "$UUID" }
-      ],
-      "tls": $hy2_tls
-    },
-    {
-      "type": "anytls",
-      "tag": "AnyTLS-in",
-      "listen": "::",
-      "listen_port": $ANYTLS_PORT,
-      "users": [
-        { "password": "$UUID" }
-      ],
-      "tls": $anytls_tls
-    }
+$inbounds_json
   ],
-  "outbounds": [
-    { "type": "direct", "tag": "direct" }
-  ]
+  "outbounds": [ { "type": "direct", "tag": "direct" } ]
 }
 EOF
         ok "sing-box 配置已生成: $CONFIG_JSON"
     else
+        local yaml_inbounds=""
+        if [[ $ENABLE_WS -eq 1 ]]; then
+            yaml_inbounds+="
+  - name: vless-ws-in
+    type: vless
+    port: $WS_PORT
+    listen: \"::\"
+    users:
+      - username: user
+        uuid: $UUID
+        flow: \"\"
+    ws-path: \"/\"
+    ws-headers:
+      Host: $WS_DOMAIN
+    allow-insecure: true
+"
+        fi
+        if [[ $ENABLE_HY2 -eq 1 ]]; then
+            yaml_inbounds+="
+  - name: hy2-in
+    type: hysteria2
+    port: $HY2_PORT
+    listen: \"::\"
+    users:
+      user: $UUID
+    certificate: $CERT_FILE
+    private-key: $KEY_FILE
+    sni: $COMMON_SNI
+"
+        fi
+        if [[ $ENABLE_ANYTLS -eq 1 ]]; then
+            yaml_inbounds+="
+  - name: anytls-in
+    type: anytls
+    port: $ANYTLS_PORT
+    listen: \"::\"
+    users:
+      user: $UUID
+    certificate: $CERT_FILE
+    private-key: $KEY_FILE
+"
+        fi
+
         cat > "$CONFIG_JSON" <<EOF
 log-level: error
 ipv6: true
@@ -274,37 +344,7 @@ mode: rule
 external-controller: 127.0.0.1:9090
 
 listeners:
-  - name: vless-ws-in
-    type: vless
-    port: $WS_PORT
-    listen: "::"
-    users:
-      - username: user
-        uuid: $UUID
-        flow: ""
-    ws-path: "/"
-    ws-headers:
-      Host: $WS_DOMAIN
-    allow-insecure: true
-
-  - name: hy2-in
-    type: hysteria2
-    port: $HY2_PORT
-    listen: "::"
-    users:
-      user: $UUID
-    certificate: $CERT_FILE
-    private-key: $KEY_FILE
-    sni: $COMMON_SNI
-
-  - name: anytls-in
-    type: anytls
-    port: $ANYTLS_PORT
-    listen: "::"
-    users:
-      user: $UUID
-    certificate: $CERT_FILE
-    private-key: $KEY_FILE
+$yaml_inbounds
 
 proxies: []
 proxy-groups: []
@@ -509,15 +549,19 @@ output_links() {
         ip_for_url="[$PUBLIC_IP]"
     fi
 
-    echo -e "vless://$UUID@$WS_DOMAIN:$WS_PORT?encryption=none&security=none&type=ws&host=$WS_DOMAIN&path=#vless-ws"
-    echo ""
+    if [[ $ENABLE_WS -eq 1 ]]; then
+        echo -e "vless://$UUID@$WS_DOMAIN:$WS_PORT?encryption=none&security=none&type=ws&host=$WS_DOMAIN&path=#vless-ws"
+        echo ""
+    fi
+    if [[ $ENABLE_ANYTLS -eq 1 ]]; then
+        echo -e "anytls://$UUID@$ip_for_url:$ANYTLS_PORT?security=tls&sni=$COMMON_SNI&type=tcp#anytls"
+        echo ""
+    fi
+    if [[ $ENABLE_HY2 -eq 1 ]]; then
+        echo -e "hysteria2://$UUID@$ip_for_url:$HY2_PORT?security=tls&sni=$COMMON_SNI&mport=$HY2_PORTS&ports=$HY2_PORTS#hy2"
+        echo ""
+    fi
 
-    echo -e "anytls://$UUID@$ip_for_url:$ANYTLS_PORT?security=tls&sni=$COMMON_SNI&type=tcp#anytls"
-    echo ""
-
-    echo -e "hysteria2://$UUID@$ip_for_url:$HY2_PORT?security=tls&sni=$COMMON_SNI&mport=$HY2_PORTS&ports=$HY2_PORTS#hy2"
-    echo ""
-    
     echo -e "${YELLOW}复制链接到客户端即可使用${NC}"
     echo ""
 }
@@ -563,9 +607,11 @@ main() {
     uninstall_old
     install_core
     get_config_all
-    generate_cert
+    if [[ $ENABLE_HY2 -eq 1 || $ENABLE_ANYTLS -eq 1 ]]; then
+        generate_cert
+    fi
     write_config
-    setup_iptables
+    [[ $ENABLE_HY2 -eq 1 ]] && setup_iptables
     create_service
     get_public_ip
     output_links
