@@ -78,29 +78,42 @@ uninstall_old() {
     for i in 0 1; do
         local svc="${names[$i]}"
         local dir="${dirs[$i]}"
-        if [ -d "$dir" ]; then
-            warn "检测到已安装的 $svc，执行卸载..."
+        if [ -d "$dir" ] || [ -f "/etc/init.d/$svc" ] || [ -f "/lib/systemd/system/${svc}.service" ]; then
+            warn "检测到已安装的 $svc，执行完整卸载..."
             if [ "$INIT" = "systemd" ]; then
                 systemctl stop "$svc" 2>/dev/null || true
                 systemctl disable "$svc" 2>/dev/null || true
                 rm -f "/lib/systemd/system/${svc}.service"
+                systemctl daemon-reload 2>/dev/null || true
             elif [ "$INIT" = "openrc" ]; then
                 rc-service "$svc" stop 2>/dev/null || true
-                rc-update del "$svc" 2>/dev/null || true
+                rc-update del "$svc" default 2>/dev/null || true
                 rm -f "/etc/init.d/${svc}"
             fi
-            rm -rf "$dir" "/var/log/$svc"
+            rm -rf "$dir" "/var/log/$svc" "/run/${svc}.pid" "/tmp/${svc}"*
+            ok "已卸载 $svc"
         fi
     done
 
+    # 清理可能残留的 iptables NAT 端口跳跃规则（HY2）
+    if command -v iptables &>/dev/null; then
+        iptables -t nat -S PREROUTING 2>/dev/null | grep -E 'REDIRECT.*to-ports' | while read -r rule; do
+            eval "iptables -t nat ${rule/-A/-D}" 2>/dev/null || true
+        done
+        if command -v ip6tables &>/dev/null; then
+            ip6tables -t nat -S PREROUTING 2>/dev/null | grep -E 'REDIRECT.*to-ports' | while read -r rule; do
+                eval "ip6tables -t nat ${rule/-A/-D}" 2>/dev/null || true
+            done
+        fi
+    fi
+
     if [ -d "/etc/iptables" ]; then
-        info "删除 iptables 配置文件..."
+        info "删除 iptables 持久化文件与软件包..."
         rm -rf /etc/iptables
-        info "卸载 iptables 软件包..."
         if command -v apk &>/dev/null; then
             apk del iptables ip6tables 2>/dev/null || true
         elif command -v apt-get &>/dev/null; then
-            apt-get remove -y iptables 2>/dev/null || true
+            apt-get remove -y iptables iptables-persistent 2>/dev/null || true
         elif command -v dnf &>/dev/null; then
             dnf remove -y iptables iptables-services 2>/dev/null || true
         elif command -v yum &>/dev/null; then
@@ -166,37 +179,34 @@ get_config_all() {
     echo ""
     echo "UUID: $UUID"
     COMMON_SNI="apple.com"
-    echo ""
-    echo "SNI: $COMMON_SNI"
+    echo "SNI / 伪装域名: $COMMON_SNI"
     echo ""
 
-    ENABLE_WS=0; ENABLE_HY2=0; ENABLE_ANYTLS=0
+    ENABLE_WS=0; ENABLE_HY2=0; ENABLE_VLESS_REALITY=0
 
     echo "请选择要安装的协议（可多选，用空格或逗号分隔，例如: 1 3 或 2）:"
     echo "  1) VLESS + WebSocket (无 TLS)"
     echo "  2) Hysteria2"
-    echo "  3) AnyTLS"
+    echo "  3) VLESS + Reality + Vision"
     read -p "$(echo -e "${CYAN}请输入选项:${NC} ")" PROTO_CHOICE
     for n in ${PROTO_CHOICE//,/ }; do
         case "$n" in
             1) ENABLE_WS=1 ;;
             2) ENABLE_HY2=1 ;;
-            3) ENABLE_ANYTLS=1 ;;
+            3) ENABLE_VLESS_REALITY=1 ;;
         esac
     done
-    if [[ $ENABLE_WS -eq 0 && $ENABLE_HY2 -eq 0 && $ENABLE_ANYTLS -eq 0 ]]; then
+    if [[ $ENABLE_WS -eq 0 && $ENABLE_HY2 -eq 0 && $ENABLE_VLESS_REALITY -eq 0 ]]; then
         error "至少需要选择一个协议"
     fi
-    echo "已选择: $([ $ENABLE_WS -eq 1 ] && printf 'WS ') $([ $ENABLE_HY2 -eq 1 ] && printf 'HY2 ') $([ $ENABLE_ANYTLS -eq 1 ] && printf 'AnyTLS ')"
+    echo "已选择: $([ $ENABLE_WS -eq 1 ] && printf 'WS ') $([ $ENABLE_HY2 -eq 1 ] && printf 'HY2 ') $([ $ENABLE_VLESS_REALITY -eq 1 ] && printf 'VLESS-Reality-Vision ')"
 
     if [[ $ENABLE_WS -eq 1 ]]; then
         echo ""; info "配置 VLESS + WebSocket (无 TLS)"
-        read -p "$(echo -e "${CYAN}域名:${NC} ")" WS_DOMAIN
-        [[ -z $WS_DOMAIN ]] && error "域名不能为空"
-        echo "域名: $WS_DOMAIN"
         read -p "$(echo -e "${CYAN}端口 (回车随机 10000-50000):${NC} ")" WS_PORT
         [[ -z $WS_PORT ]] && WS_PORT=$((RANDOM % 40001 + 10000))
         echo "端口: $WS_PORT"
+        echo "WS Host: $COMMON_SNI"
     fi
 
     if [[ $ENABLE_HY2 -eq 1 ]]; then
@@ -204,20 +214,30 @@ get_config_all() {
         read -p "$(echo -e "${CYAN}端口 (回车随机 10000-50000):${NC} ")" HY2_PORT
         [[ -z $HY2_PORT ]] && HY2_PORT=$((RANDOM % 40001 + 10000))
         echo "端口: $HY2_PORT"
-        read -p "$(echo -e "${CYAN}端口跳跃范围 (起始-结束，默认 10000-50000):${NC} ")" HY2_PORTS
-        [[ -z $HY2_PORTS ]] && HY2_PORTS="10000-50000"
+        read -p "$(echo -e "${CYAN}端口跳跃范围 (起始-结束，默认 51250-51259):${NC} ")" HY2_PORTS
+        [[ -z $HY2_PORTS ]] && HY2_PORTS="51250-51259"
         if [[ ! "$HY2_PORTS" =~ ^[0-9]+-[0-9]+$ ]]; then
-            warn "端口范围格式错误，使用默认 50000-50009"
-            HY2_PORTS="50000-50009"
+            warn "端口范围格式错误，使用默认 51250-51259"
+            HY2_PORTS="51250-51259"
         fi
         echo "端口跳跃: $HY2_PORTS"
     fi
 
-    if [[ $ENABLE_ANYTLS -eq 1 ]]; then
-        echo ""; info "配置 AnyTLS"
-        read -p "$(echo -e "${CYAN}端口 (回车随机 10000-50000):${NC} ")" ANYTLS_PORT
-        [[ -z $ANYTLS_PORT ]] && ANYTLS_PORT=$((RANDOM % 40001 + 10000))
-        echo "端口: $ANYTLS_PORT"
+    if [[ $ENABLE_VLESS_REALITY -eq 1 ]]; then
+        echo ""; info "配置 VLESS + Reality + Vision"
+        read -p "$(echo -e "${CYAN}端口 (回车随机 10000-50000):${NC} ")" REALITY_PORT
+        [[ -z $REALITY_PORT ]] && REALITY_PORT=$((RANDOM % 40001 + 10000))
+        echo "端口: $REALITY_PORT"
+
+        info "生成 Reality 密钥对与 short_id ..."
+        local keypair
+        keypair=$("$CORE_BIN" generate reality-keypair 2>/dev/null) || error "生成 Reality 密钥对失败"
+        REALITY_PRIVATE_KEY=$(echo "$keypair" | awk -F': ' '/PrivateKey/{print $2}' | tr -d '\r')
+        REALITY_PUBLIC_KEY=$(echo "$keypair" | awk -F': ' '/PublicKey/{print $2}' | tr -d '\r')
+        [[ -z "$REALITY_PRIVATE_KEY" || -z "$REALITY_PUBLIC_KEY" ]] && error "解析 Reality 密钥对失败"
+        REALITY_SHORT_ID=$("$CORE_BIN" generate rand --hex 8 2>/dev/null | tr -d '\r')
+        [[ -z "$REALITY_SHORT_ID" ]] && REALITY_SHORT_ID=$(openssl rand -hex 4)
+        ok "Reality 密钥与 short_id 生成完成"
     fi
     echo ""
 }
@@ -230,11 +250,19 @@ write_config() {
         \"key_path\": \"$KEY_FILE\",
         \"server_name\": \"$COMMON_SNI\"
     }"
-        local anytls_tls="{
+
+        local reality_tls="{
         \"enabled\": true,
-        \"certificate_path\": \"$CERT_FILE\",
-        \"key_path\": \"$KEY_FILE\",
-        \"server_name\": \"$COMMON_SNI\"
+        \"server_name\": \"$COMMON_SNI\",
+        \"reality\": {
+            \"enabled\": true,
+            \"handshake\": {
+                \"server\": \"$COMMON_SNI\",
+                \"server_port\": 443
+            },
+            \"private_key\": \"$REALITY_PRIVATE_KEY\",
+            \"short_id\": [\"$REALITY_SHORT_ID\"]
+        }
     }"
 
         local inbounds=()
@@ -250,7 +278,7 @@ write_config() {
       \"transport\": {
         \"type\": \"ws\",
         \"path\": \"/\",
-        \"headers\": { \"Host\": \"$WS_DOMAIN\" }
+        \"headers\": { \"Host\": \"$COMMON_SNI\" }
       }
     }")
         fi
@@ -264,14 +292,16 @@ write_config() {
       \"tls\": $hy2_tls
     }")
         fi
-        if [[ $ENABLE_ANYTLS -eq 1 ]]; then
+        if [[ $ENABLE_VLESS_REALITY -eq 1 ]]; then
             inbounds+=("    {
-      \"type\": \"anytls\",
-      \"tag\": \"AnyTLS-in\",
+      \"type\": \"vless\",
+      \"tag\": \"VLESS-Reality-Vision-in\",
       \"listen\": \"::\",
-      \"listen_port\": $ANYTLS_PORT,
-      \"users\": [ { \"password\": \"$UUID\" } ],
-      \"tls\": $anytls_tls
+      \"listen_port\": $REALITY_PORT,
+      \"users\": [
+        { \"uuid\": \"$UUID\", \"flow\": \"xtls-rprx-vision\" }
+      ],
+      \"tls\": $reality_tls
     }")
         fi
 
@@ -306,7 +336,7 @@ EOF
         flow: \"\"
     ws-path: \"/\"
     ws-headers:
-      Host: $WS_DOMAIN
+      Host: $COMMON_SNI
     allow-insecure: true
 "
         fi
@@ -323,16 +353,23 @@ EOF
     sni: $COMMON_SNI
 "
         fi
-        if [[ $ENABLE_ANYTLS -eq 1 ]]; then
+        if [[ $ENABLE_VLESS_REALITY -eq 1 ]]; then
             yaml_inbounds+="
-  - name: anytls-in
-    type: anytls
-    port: $ANYTLS_PORT
+  - name: vless-reality-vision-in
+    type: vless
+    port: $REALITY_PORT
     listen: \"::\"
     users:
-      user: $UUID
-    certificate: $CERT_FILE
-    private-key: $KEY_FILE
+      - username: user
+        uuid: $UUID
+        flow: xtls-rprx-vision
+    reality-config:
+      dest: $COMMON_SNI:443
+      private-key: $REALITY_PRIVATE_KEY
+      short-id:
+        - $REALITY_SHORT_ID
+      server-names:
+        - $COMMON_SNI
 "
         fi
 
@@ -553,8 +590,8 @@ output_links() {
         echo -e "vless://$UUID@$WS_DOMAIN:$WS_PORT?encryption=none&security=none&type=ws&host=$WS_DOMAIN&path=#vless-ws"
         echo ""
     fi
-    if [[ $ENABLE_ANYTLS -eq 1 ]]; then
-        echo -e "anytls://$UUID@$ip_for_url:$ANYTLS_PORT?security=tls&sni=$COMMON_SNI&type=tcp#anytls"
+    if [[ $ENABLE_VLESS_REALITY -eq 1 ]]; then
+        echo -e "vless://$UUID@$ip_for_url:$REALITY_PORT?encryption=none&flow=xtls-rprx-vision&security=reality&sni=$COMMON_SNI&fp=chrome&pbk=$REALITY_PUBLIC_KEY&sid=$REALITY_SHORT_ID&type=tcp#vless-reality-vision"
         echo ""
     fi
     if [[ $ENABLE_HY2 -eq 1 ]]; then
