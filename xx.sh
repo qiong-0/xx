@@ -179,7 +179,7 @@ get_config_all() {
     echo ""
     echo "UUID: $UUID"
     COMMON_SNI="apple.com"
-    echo "SNI / 伪装域名: $COMMON_SNI"
+    echo "域名: $COMMON_SNI"
     echo ""
 
     ENABLE_WS=0; ENABLE_HY2=0; ENABLE_VLESS_REALITY=0
@@ -203,10 +203,12 @@ get_config_all() {
 
     if [[ $ENABLE_WS -eq 1 ]]; then
         echo ""; info "配置 VLESS + WebSocket (无 TLS)"
+        read -p "$(echo -e "${CYAN}域名:${NC} ")" WS_DOMAIN
+        [[ -z $WS_DOMAIN ]] && error "域名不能为空"
+        echo "域名: $WS_DOMAIN"
         read -p "$(echo -e "${CYAN}端口 (回车随机 10000-50000):${NC} ")" WS_PORT
         [[ -z $WS_PORT ]] && WS_PORT=$((RANDOM % 40001 + 10000))
         echo "端口: $WS_PORT"
-        echo "WS Host: $COMMON_SNI"
     fi
 
     if [[ $ENABLE_HY2 -eq 1 ]]; then
@@ -228,6 +230,7 @@ get_config_all() {
         read -p "$(echo -e "${CYAN}端口 (回车随机 10000-50000):${NC} ")" REALITY_PORT
         [[ -z $REALITY_PORT ]] && REALITY_PORT=$((RANDOM % 40001 + 10000))
         echo "端口: $REALITY_PORT"
+        echo "Reality SNI / 伪装域名: $COMMON_SNI"
 
         info "生成 Reality 密钥对与 short_id ..."
         local keypair
@@ -278,7 +281,7 @@ write_config() {
       \"transport\": {
         \"type\": \"ws\",
         \"path\": \"/\",
-        \"headers\": { \"Host\": \"$COMMON_SNI\" }
+        \"headers\": { \"Host\": \"$WS_DOMAIN\" }
       }
     }")
         fi
@@ -336,7 +339,7 @@ EOF
         flow: \"\"
     ws-path: \"/\"
     ws-headers:
-      Host: $COMMON_SNI
+      Host: $WS_DOMAIN
     allow-insecure: true
 "
         fi
