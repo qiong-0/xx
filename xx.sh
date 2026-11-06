@@ -51,19 +51,6 @@ install_deps() {
     done
 }
 
-install_s5_deps() {
-    [[ $ENABLE_S5 -eq 1 ]] || return 0
-    info "安装 S5 家宽出口依赖 (openvpn, python3)..."
-    case $PKG_MANAGER in
-        apk) $INSTALL_CMD openvpn python3 ;;
-        apt) $UPDATE_CMD && $INSTALL_CMD openvpn python3 ;;
-        yum|dnf|zypper) $UPDATE_CMD && $INSTALL_CMD openvpn python3 ;;
-    esac
-    for cmd in openvpn python3; do
-        command -v $cmd &>/dev/null || error "$cmd 安装失败"
-    done
-}
-
 detect_init() {
     if command -v systemctl &>/dev/null; then
         INIT="systemd"
@@ -107,34 +94,6 @@ uninstall_old() {
             ok "已卸载 $svc"
         fi
     done
-
-    # 清理 S5 家宽出口相关
-    if [ "$INIT" = "systemd" ]; then
-        for c in jp us; do
-            systemctl stop "vpngate-$c" 2>/dev/null || true
-            systemctl disable "vpngate-$c" 2>/dev/null || true
-            systemctl stop "vpngate-heal-$c.timer" 2>/dev/null || true
-            systemctl disable "vpngate-heal-$c.timer" 2>/dev/null || true
-            rm -f "/etc/systemd/system/vpngate-$c.service"
-            rm -f "/etc/systemd/system/vpngate-heal-$c.service"
-            rm -f "/etc/systemd/system/vpngate-heal-$c.timer"
-            rm -f "/lib/systemd/system/vpngate-$c.service"
-            rm -f "/lib/systemd/system/vpngate-heal-$c.service"
-            rm -f "/lib/systemd/system/vpngate-heal-$c.timer"
-        done
-        systemctl daemon-reload 2>/dev/null || true
-    elif [ "$INIT" = "openrc" ]; then
-        for c in jp us; do
-            rc-service "vpngate-$c" stop 2>/dev/null || true
-            rc-update del "vpngate-$c" default 2>/dev/null || true
-            rc-service "vpngate-heal-$c" stop 2>/dev/null || true
-            rc-update del "vpngate-heal-$c" default 2>/dev/null || true
-            rm -f "/etc/init.d/vpngate-$c"
-            rm -f "/etc/init.d/vpngate-heal-$c"
-        done
-    fi
-    rm -rf "/etc/sing-box/vpngate" "/etc/mihomo/vpngate" "/var/log/vpngate"
-    rm -f /usr/local/bin/vpngate-fetch.sh /usr/local/bin/vpngate-heal.sh /usr/local/bin/vpngate-heal-loop.sh
 
     # 清理可能残留的 iptables NAT 端口跳跃规则（HY2）
     if command -v iptables &>/dev/null; then
@@ -215,18 +174,6 @@ generate_cert() {
     KEY_FILE="$key_file"
 }
 
-gen_s5_port() {
-    local p
-    while :; do
-        p=$((RANDOM % 40001 + 10000))
-        [[ "$p" == "${WS_PORT:-}" ]] && continue
-        [[ "$p" == "${HY2_PORT:-}" ]] && continue
-        [[ "$p" == "${REALITY_PORT:-}" ]] && continue
-        echo "$p"
-        return
-    done
-}
-
 get_config_all() {
     UUID=$(cat /proc/sys/kernel/random/uuid)
     echo ""
@@ -235,27 +182,24 @@ get_config_all() {
     echo "域名: $COMMON_SNI"
     echo ""
 
-    ENABLE_WS=0; ENABLE_HY2=0; ENABLE_VLESS_REALITY=0; ENABLE_S5=0
-    S5_PORT_JP=""; S5_PORT_US=""; S5_USER=""; S5_PASS=""
+    ENABLE_WS=0; ENABLE_HY2=0; ENABLE_VLESS_REALITY=0
 
-    echo "请选择要安装的协议（可多选，用空格或逗号分隔，例如: 1 3 或 2 4）:"
+    echo "请选择要安装的协议（可多选，用空格或逗号分隔，例如: 1 3 或 2）:"
     echo "  1) VLESS + WebSocket (无 TLS)"
     echo "  2) Hysteria2"
     echo "  3) VLESS + Reality + Vision"
-    echo "  4) S5 日本/美国 VPNGate 家宽出口（仅 TCP）"
     read -p "$(echo -e "${CYAN}请输入选项:${NC} ")" PROTO_CHOICE
     for n in ${PROTO_CHOICE//,/ }; do
         case "$n" in
             1) ENABLE_WS=1 ;;
             2) ENABLE_HY2=1 ;;
             3) ENABLE_VLESS_REALITY=1 ;;
-            4) ENABLE_S5=1 ;;
         esac
     done
-    if [[ $ENABLE_WS -eq 0 && $ENABLE_HY2 -eq 0 && $ENABLE_VLESS_REALITY -eq 0 && $ENABLE_S5 -eq 0 ]]; then
+    if [[ $ENABLE_WS -eq 0 && $ENABLE_HY2 -eq 0 && $ENABLE_VLESS_REALITY -eq 0 ]]; then
         error "至少需要选择一个协议"
     fi
-    echo "已选择: $([ $ENABLE_WS -eq 1 ] && printf 'WS ') $([ $ENABLE_HY2 -eq 1 ] && printf 'HY2 ') $([ $ENABLE_VLESS_REALITY -eq 1 ] && printf 'VLESS-Reality-Vision ') $([ $ENABLE_S5 -eq 1 ] && printf 'S5-JP/US ')"
+    echo "已选择: $([ $ENABLE_WS -eq 1 ] && printf 'WS ') $([ $ENABLE_HY2 -eq 1 ] && printf 'HY2 ') $([ $ENABLE_VLESS_REALITY -eq 1 ] && printf 'VLESS-Reality-Vision ')"
 
     if [[ $ENABLE_WS -eq 1 ]]; then
         echo ""; info "配置 VLESS + WebSocket (无 TLS)"
@@ -298,331 +242,7 @@ get_config_all() {
         [[ -z "$REALITY_SHORT_ID" ]] && REALITY_SHORT_ID=$(openssl rand -hex 4)
         ok "Reality 密钥与 short_id 生成完成"
     fi
-
-    if [[ $ENABLE_S5 -eq 1 ]]; then
-        echo ""; info "配置 S5 日本/美国 VPNGate 家宽出口（仅 TCP）"
-        S5_USER="s5$(openssl rand -hex 4)"
-        S5_PASS=$(openssl rand -hex 16)
-        read -p "$(echo -e "${CYAN}日本 S5 端口 (回车随机 10000-50000):${NC} ")" S5_PORT_JP
-        [[ -z "$S5_PORT_JP" ]] && S5_PORT_JP=$(gen_s5_port)
-        if [[ ! "$S5_PORT_JP" =~ ^[0-9]+$ ]]; then
-            warn "日本端口格式错误，改用随机端口"
-            S5_PORT_JP=$(gen_s5_port)
-        fi
-        read -p "$(echo -e "${CYAN}美国 S5 端口 (回车随机 10000-50000):${NC} ")" S5_PORT_US
-        [[ -z "$S5_PORT_US" ]] && S5_PORT_US=$(gen_s5_port)
-        if [[ ! "$S5_PORT_US" =~ ^[0-9]+$ ]]; then
-            warn "美国端口格式错误，改用随机端口"
-            S5_PORT_US=$(gen_s5_port)
-        fi
-        while [[ "$S5_PORT_US" == "$S5_PORT_JP" ]]; do
-            S5_PORT_US=$(gen_s5_port)
-        done
-        echo "S5 日本端口: $S5_PORT_JP"
-        echo "S5 美国端口: $S5_PORT_US"
-        echo "S5 用户名: $S5_USER"
-        echo "S5 密码: $S5_PASS"
-        if [ ! -e /dev/net/tun ]; then
-            warn "/dev/net/tun 不存在，隧道可能无法创建"
-        fi
-    fi
     echo ""
-}
-
-setup_vpngate() {
-    [[ $ENABLE_S5 -eq 1 ]] || return 0
-    install_s5_deps
-
-    local work_dir="$CORE_DIR/vpngate"
-    mkdir -p "$work_dir" /var/log/vpngate
-    local openvpn_bin
-    openvpn_bin=$(command -v openvpn)
-    printf 'vpn\nvpn\n' > "$work_dir/auth.txt"
-    chmod 600 "$work_dir/auth.txt"
-
-    cat > /usr/local/bin/vpngate-fetch.sh <<'FETCHEOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-country="$1"
-core_dir="$2"
-max_try="${3:-15}"
-work_dir="$core_dir/vpngate"
-mkdir -p "$work_dir"
-csv_file="$work_dir/vglist.csv"
-candidates_file="$work_dir/candidates-$country.txt"
-
-curl -s --max-time 30 https://www.vpngate.net/api/iphone/ -o "$csv_file" || exit 1
-
-python3 - "$csv_file" "$country" "$max_try" > "$candidates_file" <<'PY'
-import csv, sys, io
-csv_file, country, max_try = sys.argv[1], sys.argv[2], int(sys.argv[3])
-with open(csv_file, newline='', encoding='utf-8-sig', errors='ignore') as f:
-    lines = f.readlines()
-data = ''.join([l for l in lines if not l.startswith('*') and not l.startswith('#')])
-reader = csv.DictReader(io.StringIO(data))
-rows = []
-for r in reader:
-    if r.get('CountryShort', '').upper() == country.upper():
-        try:
-            score = int(r.get('Score', '0') or 0)
-        except Exception:
-            score = 0
-        rows.append((score, r))
-rows.sort(key=lambda x: x[0], reverse=True)
-for score, r in rows[:max_try]:
-    print(f"{r.get('IP','')}\t{score}\t{r.get('OpenVPN_ConfigData_Base64','')}")
-PY
-
-exclude_ip=""
-for f in "$work_dir"/jp.ip "$work_dir"/us.ip; do
-    [ -f "$f" ] && exclude_ip+="$(cat "$f")
-"
-done
-
-while IFS=$'\t' read -r ip score b64; do
-    [ -z "$ip" ] && continue
-    if echo "$exclude_ip" | grep -qx "$ip"; then
-        continue
-    fi
-    tmp_ovpn="$work_dir/tmp-${country}.ovpn"
-    echo "$b64" | base64 -d > "$tmp_ovpn" 2>/dev/null || continue
-    dev="tun-test-${country}-$$"
-    authfile="$work_dir/auth-test.txt"
-    printf 'vpn\nvpn\n' > "$authfile"
-    log="$work_dir/test-${country}.log"
-    openvpn --config "$tmp_ovpn" --dev "$dev" --route-nopull \
-        --pull-filter ignore "dhcp-option" \
-        --auth-user-pass "$authfile" --auth-nocache --verb 3 --log "$log" &
-    pid=$!
-    for i in $(seq 1 20); do
-        if ip -4 addr show dev "$dev" 2>/dev/null | grep -q 'inet '; then
-            break
-        fi
-        sleep 1
-    done
-    ok=0
-    if ip -4 addr show dev "$dev" 2>/dev/null | grep -q 'inet '; then
-        out=$(curl -s --max-time 15 --interface "$dev" https://ipinfo.io/json 2>/dev/null || true)
-        if echo "$out" | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("country","").upper()==sys.argv[1].upper() else 1)' "$country" 2>/dev/null; then
-            ok=1
-            mv "$tmp_ovpn" "$work_dir/$country.ovpn"
-            echo "$ip" > "$work_dir/$country.ip"
-        fi
-    fi
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-    ip link del "$dev" 2>/dev/null || true
-    rm -f "$tmp_ovpn" "$authfile" "$log"
-    if [ "$ok" = "1" ]; then
-        exit 0
-    fi
-done < "$candidates_file"
-
-exit 1
-FETCHEOF
-    chmod +x /usr/local/bin/vpngate-fetch.sh
-
-    cat > /usr/local/bin/vpngate-heal.sh <<'HEALEOF'
-#!/usr/bin/env bash
-set -euo pipefail
-
-country="$1"
-core_dir="$2"
-work_dir="$core_dir/vpngate"
-log_dir="/var/log/vpngate"
-mkdir -p "$log_dir"
-
-lockdir="$work_dir/heal-${country}.lock"
-if ! mkdir "$lockdir" 2>/dev/null; then
-    exit 0
-fi
-cleanup() { rmdir "$lockdir" 2>/dev/null || true; }
-trap cleanup EXIT
-
-log="$log_dir/${country}.log"
-echo "$(date '+%F %T') 检查 $country" >> "$log"
-
-restart_svc() {
-    if command -v systemctl &>/dev/null; then
-        systemctl restart "vpngate-$1" 2>/dev/null || true
-    elif command -v rc-service &>/dev/null; then
-        rc-service "vpngate-$1" restart 2>/dev/null || true
-    fi
-}
-
-check_ok() {
-    curl -s --max-time 15 --interface "tun-$1" https://ipinfo.io/ip >/dev/null 2>&1
-}
-
-if check_ok "$country"; then
-    echo "$(date '+%F %T') $country 正常" >> "$log"
-    exit 0
-fi
-
-echo "$(date '+%F %T') $country 不通，重启服务" >> "$log"
-restart_svc "$country"
-sleep 15
-
-if check_ok "$country"; then
-    echo "$(date '+%F %T') $country 重启后恢复" >> "$log"
-    exit 0
-fi
-
-echo "$(date '+%F %T') $country 重启无效，换节点" >> "$log"
-if /usr/local/bin/vpngate-fetch.sh "$country" "$core_dir" >> "$log" 2>&1; then
-    restart_svc "$country"
-    sleep 15
-    if check_ok "$country"; then
-        echo "$(date '+%F %T') $country 换节点后恢复" >> "$log"
-    else
-        echo "$(date '+%F %T') $country 换节点后仍不通" >> "$log"
-    fi
-else
-    echo "$(date '+%F %T') $country 拉取新节点失败" >> "$log"
-fi
-HEALEOF
-    chmod +x /usr/local/bin/vpngate-heal.sh
-
-    cat > /usr/local/bin/vpngate-heal-loop.sh <<'LOOPEOF'
-#!/usr/bin/env bash
-set -u
-country="$1"
-core_dir="$2"
-trap 'exit 0' TERM INT
-while :; do
-    /usr/local/bin/vpngate-heal.sh "$country" "$core_dir" || true
-    sleep 300
-done
-LOOPEOF
-    chmod +x /usr/local/bin/vpngate-heal-loop.sh
-
-    for c in jp us; do
-        info "拉取 VPNGate $c 节点..."
-        if /usr/local/bin/vpngate-fetch.sh "$c" "$CORE_DIR"; then
-            ok "$c 节点拉取成功"
-        else
-            warn "$c 节点拉取失败，自愈将在后续尝试"
-        fi
-    done
-
-    # 先按当前 INIT 写服务
-    for c in jp us; do
-        if [[ $INIT == "systemd" ]]; then
-            cat > "/etc/systemd/system/vpngate-$c.service" <<EOF
-[Unit]
-Description=VPNGate $c tunnel
-After=network.target
-
-[Service]
-Type=simple
-ExecStartPre=-ip link del tun-$c
-ExecStart=$openvpn_bin --config "$work_dir/$c.ovpn" --dev "tun-$c" --route-nopull --pull-filter ignore "dhcp-option" --auth-user-pass "$work_dir/auth.txt" --auth-nocache --verb 3
-Restart=on-failure
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-EOF
-        else
-            cat > "/etc/init.d/vpngate-$c" <<EOF
-#!/sbin/openrc-run
-name="vpngate-$c"
-description="VPNGate $c tunnel"
-command="$openvpn_bin"
-command_args="--config $work_dir/$c.ovpn --dev tun-$c --route-nopull --pull-filter ignore dhcp-option --auth-user-pass $work_dir/auth.txt --auth-nocache --verb 3"
-command_user="root"
-command_background=true
-pidfile="/run/vpngate-$c.pid"
-output_log="/var/log/vpngate/$c-openvpn.log"
-error_log="/var/log/vpngate/$c-openvpn.log"
-start_pre() {
-    ip link del tun-$c 2>/dev/null || true
-}
-depend() {
-    need net
-}
-EOF
-            chmod +x "/etc/init.d/vpngate-$c"
-        fi
-    done
-
-    if [[ $INIT == "systemd" ]]; then
-        systemctl daemon-reload
-    fi
-
-    for c in jp us; do
-        if [[ $INIT == "systemd" ]]; then
-            systemctl enable --now "vpngate-$c" 2>/dev/null || true
-        else
-            rc-update add "vpngate-$c" default 2>/dev/null || true
-            rc-service "vpngate-$c" start 2>/dev/null || true
-        fi
-        local ready=0
-        for i in $(seq 1 20); do
-            if ip -4 addr show dev "tun-$c" 2>/dev/null | grep -q 'inet '; then
-                ready=1
-                break
-            fi
-            sleep 1
-        done
-        if [ "$ready" = "1" ]; then
-            local out
-            out=$(curl -s --max-time 15 --interface "tun-$c" https://ipinfo.io/json 2>/dev/null || true)
-            if echo "$out" | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get("country","").upper()==sys.argv[1].upper() else 1)' "$c" 2>/dev/null; then
-                ok "$c 家宽出口验证通过"
-            else
-                warn "$c 隧道已起但出口国家不符"
-            fi
-        else
-            warn "$c 隧道未就绪（无 ovpn 或启动失败，自愈会继续尝试）"
-        fi
-    done
-
-    for c in jp us; do
-        if [[ $INIT == "systemd" ]]; then
-            cat > "/etc/systemd/system/vpngate-heal-$c.service" <<EOF
-[Unit]
-Description=VPNGate $c heal
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/vpngate-heal.sh $c $CORE_DIR
-EOF
-            cat > "/etc/systemd/system/vpngate-heal-$c.timer" <<EOF
-[Unit]
-Description=VPNGate $c heal timer
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-Unit=vpngate-heal-$c.service
-
-[Install]
-WantedBy=timers.target
-EOF
-            systemctl daemon-reload
-            systemctl enable --now "vpngate-heal-$c.timer" 2>/dev/null || true
-        else
-            cat > "/etc/init.d/vpngate-heal-$c" <<EOF
-#!/sbin/openrc-run
-name="vpngate-heal-$c"
-description="VPNGate $c heal loop"
-command="/usr/local/bin/vpngate-heal-loop.sh"
-command_args="$c $CORE_DIR"
-command_user="root"
-command_background=true
-pidfile="/run/vpngate-heal-$c.pid"
-depend() {
-    need net
-    after vpngate-$c
-}
-EOF
-            chmod +x "/etc/init.d/vpngate-heal-$c"
-            rc-update add "vpngate-heal-$c" default 2>/dev/null || true
-            rc-service "vpngate-heal-$c" start 2>/dev/null || true
-        fi
-    done
 }
 
 write_config() {
@@ -687,26 +307,6 @@ write_config() {
       \"tls\": $reality_tls
     }")
         fi
-        if [[ $ENABLE_S5 -eq 1 ]]; then
-            inbounds+=("    {
-      \"type\": \"socks\",
-      \"tag\": \"socks-jp-in\",
-      \"listen\": \"::\",
-      \"listen_port\": $S5_PORT_JP,
-      \"users\": [
-        { \"username\": \"$S5_USER\", \"password\": \"$S5_PASS\" }
-      ]
-    }")
-            inbounds+=("    {
-      \"type\": \"socks\",
-      \"tag\": \"socks-us-in\",
-      \"listen\": \"::\",
-      \"listen_port\": $S5_PORT_US,
-      \"users\": [
-        { \"username\": \"$S5_USER\", \"password\": \"$S5_PASS\" }
-      ]
-    }")
-        fi
 
         local inbounds_json="" first=1
         for ib in "${inbounds[@]}"; do
@@ -715,34 +315,13 @@ write_config() {
 $ib"; fi
         done
 
-        local outbounds_json='{ "type": "direct", "tag": "direct" }'
-        if [[ $ENABLE_S5 -eq 1 ]]; then
-            outbounds_json="$outbounds_json,
-    { \"type\": \"direct\", \"tag\": \"out-jp\", \"bind_interface\": \"tun-jp\" },
-    { \"type\": \"direct\", \"tag\": \"out-us\", \"bind_interface\": \"tun-us\" }"
-        fi
-
-        local route_json=""
-        if [[ $ENABLE_S5 -eq 1 ]]; then
-            route_json=',
-  "route": {
-    "rules": [
-      { "inbound": ["socks-jp-in"], "outbound": "out-jp" },
-      { "inbound": ["socks-us-in"], "outbound": "out-us" }
-    ],
-    "final": "direct"
-  }'
-        fi
-
         cat > "$CONFIG_JSON" <<EOF
 {
   "log": { "level": "error", "output": "/dev/null", "timestamp": false },
   "inbounds": [
 $inbounds_json
   ],
-  "outbounds": [
-$outbounds_json
-  ]$route_json
+  "outbounds": [ { "type": "direct", "tag": "direct" } ]
 }
 EOF
         ok "sing-box 配置已生成: $CONFIG_JSON"
@@ -796,38 +375,6 @@ EOF
         - $COMMON_SNI
 "
         fi
-        if [[ $ENABLE_S5 -eq 1 ]]; then
-            yaml_inbounds+="
-  - name: socks-jp-in
-    type: socks
-    port: $S5_PORT_JP
-    listen: \"::\"
-    users:
-      - username: $S5_USER
-        password: $S5_PASS
-    proxy: out-jp
-  - name: socks-us-in
-    type: socks
-    port: $S5_PORT_US
-    listen: \"::\"
-    users:
-      - username: $S5_USER
-        password: $S5_PASS
-    proxy: out-us
-"
-        fi
-
-        local yaml_proxies="[]"
-        if [[ $ENABLE_S5 -eq 1 ]]; then
-            yaml_proxies="
-  - name: out-jp
-    type: direct
-    interface-name: tun-jp
-  - name: out-us
-    type: direct
-    interface-name: tun-us
-"
-        fi
 
         cat > "$CONFIG_JSON" <<EOF
 log-level: error
@@ -839,7 +386,7 @@ external-controller: 127.0.0.1:9090
 listeners:
 $yaml_inbounds
 
-proxies:$yaml_proxies
+proxies: []
 proxy-groups: []
 rules:
   - MATCH,DIRECT
@@ -1054,14 +601,6 @@ output_links() {
         echo -e "hysteria2://$UUID@$ip_for_url:$HY2_PORT?security=tls&sni=$COMMON_SNI&mport=$HY2_PORTS&ports=$HY2_PORTS#hy2"
         echo ""
     fi
-    if [[ $ENABLE_S5 -eq 1 ]]; then
-        echo -e "${GREEN}S5 家宽出口（仅 TCP）：${NC}"
-        echo -e "socks5://$(urlencode "$S5_USER"):$(urlencode "$S5_PASS")@$ip_for_url:$S5_PORT_JP#日本家宽VPngate"
-        echo -e "socks5://$(urlencode "$S5_USER"):$(urlencode "$S5_PASS")@$ip_for_url:$S5_PORT_US#美国家宽VPngate"
-        echo ""
-        echo -e "${YELLOW}提示：S5 出口依赖 VPNGate 隧道，若某国节点暂不可用，自愈会每 5 分钟尝试恢复。${NC}"
-        echo ""
-    fi
 
     echo -e "${YELLOW}复制链接到客户端即可使用${NC}"
     echo ""
@@ -1108,11 +647,6 @@ main() {
     uninstall_old
     install_core
     get_config_all
-
-    if [[ $ENABLE_S5 -eq 1 ]]; then
-        setup_vpngate
-    fi
-
     if [[ $ENABLE_HY2 -eq 1 || $ENABLE_ANYTLS -eq 1 ]]; then
         generate_cert
     fi
