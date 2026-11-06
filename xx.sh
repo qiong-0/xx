@@ -598,7 +598,7 @@ output_links() {
         echo ""
     fi
     if [[ $ENABLE_HY2 -eq 1 ]]; then
-        echo -e "hysteria2://$UUID@$ip_for_url:$HY2_PORT?security=tls&sni=$COMMON_SNI&mport=$HY2_PORTS&ports=$HY2_PORTS#hy2"
+        echo -e "hy2://$UUID@$ip_for_url:$HY2_PORT?security=tls&sni=$COMMON_SNI&mport=$HY2_PORTS&ports=$HY2_PORTS#hy2"
         echo ""
     fi
 
